@@ -1,0 +1,125 @@
+%% ====================== 1. 读入光谱数据 ==========================
+% 假设 CSV 中两列：第1列为波长 (nm)，第2列为强度。
+% 若有表头，可用 readtable 再修改下面两行取列的方式。
+
+% === 方式 A：没有表头，纯数字两列 ===
+data = readmatrix('1.csv');      % 请改成你的文件名
+
+lambda = data(:,1);   % 波长 λ
+I_raw  = data(:,2);   % 原始强度 I(λ)
+
+% === 若你的 CSV 有表头，类似 Wavelength,Intensity，可改用：===
+% T = readtable('spectrum_white.csv');
+% lambda = T.Wavelength;     % 根据实际列名修改
+% I_raw  = T.Intensity;
+
+% 按波长排序，避免乱序对拟合造成影响
+[lambda, idx] = sort(lambda);
+I_raw = I_raw(idx);
+
+%% ====================== 2. 平滑光谱 ==============================
+% 使用 Savitzky-Golay 平滑（smooth 中的 'sgolay'）
+% span 越大越平滑，但细节会变少。根据数据点数和噪声大小调整。
+span = 21;                            % 建议奇数，例如 11, 21, 31...
+I_smooth = smooth(lambda, I_raw, span, 'sgolay');
+
+%% ====================== 3. 三高斯峰拟合 (RGB) ====================
+% 拟合模型：gauss3 (内置三高斯峰)
+% 形式：f(λ) = a1*exp(-((λ-b1)/c1)^2) + a2*exp(-((λ-b2)/c2)^2) + a3*exp(-((λ-b3)/c3)^2)
+
+% 创建拟合类型
+ft = fittype('gauss3');
+
+% 创建拟合选项
+opts = fitoptions(ft);
+
+% 根据可见光范围及你光谱的范围设置参数范围
+% 这里假设波长范围大约 400–700 nm，可根据数据实际范围修改。
+% 参数顺序： [a1, b1, c1,  a2, b2, c2,  a3, b3, c3]
+opts.Lower = [0, 400,  5,   0, 500,  5,   0, 600,  5];   % 下界
+opts.Upper = [Inf,500,200,  Inf,600,200,  Inf,700,200];  % 上界
+
+% 设置初始值（峰高取 I_raw 最大值，中心波长分别给蓝/绿/红典型值）
+Imax = max(I_raw);
+opts.StartPoint = [...
+    Imax, 438., 30,...   % 峰1 初始：蓝光中心 ~460 nm
+    Imax, 546.1, 30,...   % 峰2 初始：绿光中心 ~540 nm
+    Imax, 700, 30   % 峰3 初始：红光中心 ~620 nm
+];
+
+% 实际拟合：对“平滑后的光谱”做拟合，可减少噪声对拟合的影响
+[fit_res, gof] = fit(lambda, I_smooth, ft, opts);
+
+% 打印拟合优度（R^2 等）
+disp('=== 拟合优度（Goodness of Fit） ===');
+disp(gof);
+
+%% ====================== 4. 从拟合结果中分离 RGB 单峰 =============
+% gauss3 的参数顺序为：
+% a1, b1, c1,  a2, b2, c2,  a3, b3, c3
+coeffs = coeffvalues(fit_res);
+
+a1 = coeffs(1);  b1 = coeffs(2);  c1 = coeffs(3);
+a2 = coeffs(4);  b2 = coeffs(5);  c2 = coeffs(6);
+a3 = coeffs(7);  b3 = coeffs(8);  c3 = coeffs(9);
+
+% 生成三个峰的曲线（对应 λ 轴）
+I_peak1 = a1 * exp(-((lambda - b1)./c1).^2);
+I_peak2 = a2 * exp(-((lambda - b2)./c2).^2);
+I_peak3 = a3 * exp(-((lambda - b3)./c3).^2);
+
+% 为方便理解，我们按中心波长从小到大排序为 B, G, R
+% （如果你希望严格按 B<G<R 命名，可以这样重新排列）
+[centers_sorted, idx_sort] = sort([b1, b2, b3]);   % 升序排序峰中心
+
+I_peaks = {I_peak1, I_peak2, I_peak3};
+
+I_B = I_peaks{idx_sort(1)};      % 最短波长 → 蓝光
+I_G = I_peaks{idx_sort(2)};      % 中等波长 → 绿光
+I_R = I_peaks{idx_sort(3)};      % 最长波长 → 红光
+
+% 对应的中心波长（可打印看一下）
+lambda_B = centers_sorted(1);
+lambda_G = centers_sorted(2);
+lambda_R = centers_sorted(3);
+
+fprintf('蓝峰中心波长 ≈ %.2f nm\n', lambda_B);
+fprintf('绿峰中心波长 ≈ %.2f nm\n', lambda_G);
+fprintf('红峰中心波长 ≈ %.2f nm\n', lambda_R);
+
+% 三个峰之和（理论上接近 I_smooth）
+I_fit_total = I_B + I_G + I_R;
+
+%% ====================== 5. 画图：原始 + 平滑 + RGB 三峰 ==========
+
+figure; hold on; grid on;
+
+% 1) 原始光谱
+plot(lambda, I_raw, 'Color', [0.7 0.7 0.7],...
+     'LineWidth', 1, 'DisplayName', '原始光谱');
+
+% 2) 平滑后整体光谱
+plot(lambda, I_smooth, 'k',...
+     'LineWidth', 1.5, 'DisplayName', '平滑光谱');
+
+% 3) 三个 RGB 峰
+plot(lambda, I_B, 'b--', 'LineWidth', 1.5, 'DisplayName', '蓝光峰');
+plot(lambda, I_G, 'g--', 'LineWidth', 1.5, 'DisplayName', '绿光峰');
+plot(lambda, I_R, 'r--', 'LineWidth', 1.5, 'DisplayName', '红光峰');
+
+% 4) （可选）三峰总和拟合曲线
+plot(lambda, I_fit_total, 'm', 'LineWidth', 1.5,...
+     'DisplayName', 'RGB 三峰总和拟合');
+
+% 坐标轴与标题
+xlabel('波长 $$\lambda$$ (nm)', 'Interpreter', 'latex');
+ylabel('相对强度 $$I(\lambda)$$', 'Interpreter', 'latex');
+title('白光光谱及 RGB 分峰拟合');
+
+% 图例
+legend('show','Location','best');
+
+hold off;
+
+%% ====================== 6. 可选：保存图像 ==========================
+% saveas(gcf, 'white_spectrum_RGB_fit.png');
